@@ -3,7 +3,9 @@
 A modern full-stack Employee Management System designed to simplify employee administration, attendance tracking, leave management, payroll records, project management, and HR operations through a centralized platform.
 
 🌐 **Live Demo:** [Employee Management System](https://ais-dev-nbj6etcc4xr6cyqu22wph2-665529278416.asia-east1.run.app)
+## 📸 Application Dashboard
 
+![Employee Management System Dashboard](Dashboard.png)
 ## 📌 Overview
 
 The Employee Management System (EMS) is a web-based application designed to help organizations manage employee information and HR workflows efficiently.
