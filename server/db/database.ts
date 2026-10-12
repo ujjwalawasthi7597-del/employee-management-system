@@ -1,0 +1,1089 @@
+import fs from 'fs';
+import path from 'path';
+import bcrypt from 'bcryptjs';
+
+export type UserRole = 'super_admin' | 'hr_manager' | 'dept_manager' | 'employee';
+
+export interface User {
+  id: string;
+  email: string;
+  passwordHash: string;
+  role: UserRole;
+  firstName: string;
+  lastName: string;
+  title: string;
+  departmentId: string;
+  departmentName: string;
+  avatarUrl: string;
+  status: 'active' | 'inactive' | 'suspended';
+  phone?: string;
+  joinDate: string;
+  location: string;
+  reportsToId?: string;
+  reportsToName?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Department {
+  id: string;
+  name: string;
+  code: string;
+  headId?: string;
+  headName?: string;
+  description: string;
+  employeeCount: number;
+  budget: number;
+  createdAt: string;
+}
+
+export interface AttendanceRecord {
+  id: string;
+  userId: string;
+  userName: string;
+  departmentId: string;
+  date: string; // YYYY-MM-DD
+  clockIn: string; // ISO string
+  clockOut?: string; // ISO string
+  totalHours?: number;
+  status: 'present' | 'late' | 'half_day' | 'absent' | 'on_leave';
+  ipAddress?: string;
+  notes?: string;
+  createdAt: string;
+}
+
+export interface LeaveRequest {
+  id: string;
+  userId: string;
+  userName: string;
+  departmentId: string;
+  departmentName: string;
+  leaveType: 'annual' | 'sick' | 'casual' | 'maternity' | 'paternity' | 'unpaid';
+  startDate: string;
+  endDate: string;
+  totalDays: number;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  reviewedById?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  rejectionReason?: string;
+  createdAt: string;
+}
+
+export interface LeaveBalance {
+  userId: string;
+  annual: { total: number; used: number };
+  sick: { total: number; used: number };
+  casual: { total: number; used: number };
+}
+
+export interface PayrollRecord {
+  id: string;
+  userId: string;
+  userName: string;
+  departmentId: string;
+  month: string; // e.g. "2026-10"
+  basicSalary: number;
+  allowances: {
+    hra: number;
+    transport: number;
+    medical: number;
+    performanceBonus: number;
+  };
+  deductions: {
+    tax: number;
+    providentFund: number;
+    healthInsurance: number;
+  };
+  grossSalary: number;
+  netSalary: number;
+  status: 'draft' | 'processed' | 'paid';
+  paymentDate?: string;
+  paymentMethod: 'bank_transfer' | 'cheque' | 'direct_deposit';
+  payslipNumber: string;
+  createdAt: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  departmentId: string;
+  departmentName: string;
+  leadId: string;
+  leadName: string;
+  status: 'planning' | 'in_progress' | 'on_hold' | 'completed';
+  priority: 'low' | 'medium' | 'high' | 'critical';
+  startDate: string;
+  dueDate: string;
+  progress: number;
+  members: string[]; // user IDs
+  createdAt: string;
+}
+
+export interface Task {
+  id: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  description: string;
+  assigneeId: string;
+  assigneeName: string;
+  assigneeAvatar: string;
+  createdById: string;
+  priority: 'low' | 'medium' | 'high';
+  status: 'todo' | 'in_progress' | 'in_review' | 'completed';
+  dueDate: string;
+  completedAt?: string;
+  createdAt: string;
+}
+
+export interface PerformanceReview {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  departmentName: string;
+  reviewerId: string;
+  reviewerName: string;
+  period: string; // e.g. "Q3 2026"
+  ratingOverall: number; // 1-5
+  ratings: {
+    productivity: number;
+    workQuality: number;
+    teamwork: number;
+    leadership: number;
+    punctuality: number;
+  };
+  achievements: string;
+  improvements: string;
+  goalsForNextPeriod: string;
+  status: 'draft' | 'completed';
+  reviewedAt: string;
+}
+
+export interface Announcement {
+  id: string;
+  title: string;
+  content: string;
+  authorId: string;
+  authorName: string;
+  authorRole: string;
+  priority: 'normal' | 'important' | 'urgent';
+  targetAudience: 'all' | 'engineering' | 'hr' | 'sales' | 'leadership';
+  isPinned: boolean;
+  createdAt: string;
+}
+
+export interface AuditLog {
+  id: string;
+  timestamp: string;
+  actorId: string;
+  actorEmail: string;
+  actorRole: string;
+  action: string;
+  resource: string;
+  details: string;
+  ipAddress: string;
+}
+
+export interface CompanySettings {
+  companyName: string;
+  workDays: string[];
+  workStartTime: string;
+  workEndTime: string;
+  annualLeaveQuota: number;
+  sickLeaveQuota: number;
+  casualLeaveQuota: number;
+  currency: string;
+  fiscalYearStart: string;
+}
+
+interface DatabaseSchema {
+  users: User[];
+  departments: Department[];
+  attendance: AttendanceRecord[];
+  leaves: LeaveRequest[];
+  leaveBalances: Record<string, LeaveBalance>;
+  payroll: PayrollRecord[];
+  projects: Project[];
+  tasks: Task[];
+  performanceReviews: PerformanceReview[];
+  announcements: Announcement[];
+  auditLogs: AuditLog[];
+  settings: CompanySettings;
+}
+
+const DB_FILE = path.resolve(process.cwd(), 'data', 'ems-database.json');
+
+class DatabaseEngine {
+  private data: DatabaseSchema;
+
+  constructor() {
+    this.data = this.loadOrInit();
+  }
+
+  private loadOrInit(): DatabaseSchema {
+    try {
+      if (fs.existsSync(DB_FILE)) {
+        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+        return JSON.parse(raw);
+      }
+    } catch (e) {
+      console.warn('Could not read existing database file, re-initializing...', e);
+    }
+    return this.createInitialSeedData();
+  }
+
+  private save() {
+    try {
+      const dir = path.dirname(DB_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
+    } catch (err) {
+      console.error('Failed to write database file:', err);
+    }
+  }
+
+  private createInitialSeedData(): DatabaseSchema {
+    const defaultPassword = 'Password@123';
+    const salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync(defaultPassword, salt);
+    const adminHash = bcrypt.hashSync('Admin@123', salt);
+    const hrHash = bcrypt.hashSync('Hr@123', salt);
+    const managerHash = bcrypt.hashSync('Manager@123', salt);
+    const empHash = bcrypt.hashSync('Employee@123', salt);
+
+    const departments: Department[] = [
+      {
+        id: 'dept-eng',
+        name: 'Engineering',
+        code: 'ENG',
+        headName: 'Marcus Chen',
+        description: 'Core product engineering, platform infrastructure, and DevOps.',
+        employeeCount: 14,
+        budget: 650000,
+        createdAt: '2026-01-15T09:00:00Z',
+      },
+      {
+        id: 'dept-prod',
+        name: 'Product & Design',
+        code: 'PRD',
+        headName: 'Amara Okafor',
+        description: 'Product strategy, UI/UX design systems, and user research.',
+        employeeCount: 6,
+        budget: 320000,
+        createdAt: '2026-01-15T09:00:00Z',
+      },
+      {
+        id: 'dept-hr',
+        name: 'People & Culture',
+        code: 'HR',
+        headName: 'Elena Rostova',
+        description: 'Talent acquisition, employee wellness, payroll, and compliance.',
+        employeeCount: 4,
+        budget: 180000,
+        createdAt: '2026-01-15T09:00:00Z',
+      },
+      {
+        id: 'dept-sales',
+        name: 'Sales & Growth',
+        code: 'SLS',
+        headName: 'Jordan Rivera',
+        description: 'Global enterprise sales, customer success, and partner growth.',
+        employeeCount: 9,
+        budget: 450000,
+        createdAt: '2026-01-15T09:00:00Z',
+      },
+      {
+        id: 'dept-ops',
+        name: 'Finance & Operations',
+        code: 'FIN',
+        headName: 'Claire Beaumont',
+        description: 'Corporate treasury, legal, facilities, and business analytics.',
+        employeeCount: 5,
+        budget: 290000,
+        createdAt: '2026-01-15T09:00:00Z',
+      },
+    ];
+
+    const users: User[] = [
+      {
+        id: 'usr-admin',
+        email: 'admin@talentgrid.com',
+        passwordHash: adminHash,
+        role: 'super_admin',
+        firstName: 'Arthur',
+        lastName: 'Vance',
+        title: 'Chief Executive Officer',
+        departmentId: 'dept-ops',
+        departmentName: 'Finance & Operations',
+        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 201-8841',
+        joinDate: '2024-01-10',
+        location: 'San Francisco, CA',
+        createdAt: '2024-01-10T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+      {
+        id: 'usr-hr',
+        email: 'hr@talentgrid.com',
+        passwordHash: hrHash,
+        role: 'hr_manager',
+        firstName: 'Elena',
+        lastName: 'Rostova',
+        title: 'VP of People & Culture',
+        departmentId: 'dept-hr',
+        departmentName: 'People & Culture',
+        avatarUrl: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 304-9912',
+        joinDate: '2024-03-01',
+        location: 'San Francisco, CA',
+        reportsToId: 'usr-admin',
+        reportsToName: 'Arthur Vance',
+        createdAt: '2024-03-01T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+      {
+        id: 'usr-mgr',
+        email: 'manager@talentgrid.com',
+        passwordHash: managerHash,
+        role: 'dept_manager',
+        firstName: 'Marcus',
+        lastName: 'Chen',
+        title: 'Director of Engineering',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 441-2109',
+        joinDate: '2024-04-15',
+        location: 'Austin, TX',
+        reportsToId: 'usr-admin',
+        reportsToName: 'Arthur Vance',
+        createdAt: '2024-04-15T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+      {
+        id: 'usr-emp',
+        email: 'employee@talentgrid.com',
+        passwordHash: empHash,
+        role: 'employee',
+        firstName: 'Sophia',
+        lastName: 'Lin',
+        title: 'Staff Full-Stack Engineer',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        avatarUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 782-4411',
+        joinDate: '2025-01-15',
+        location: 'Austin, TX',
+        reportsToId: 'usr-mgr',
+        reportsToName: 'Marcus Chen',
+        createdAt: '2025-01-15T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+      {
+        id: 'usr-emp2',
+        email: 'alex.torres@talentgrid.com',
+        passwordHash: hash,
+        role: 'employee',
+        firstName: 'Alex',
+        lastName: 'Torres',
+        title: 'Senior DevOps Architect',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        avatarUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 619-3388',
+        joinDate: '2025-03-01',
+        location: 'Seattle, WA',
+        reportsToId: 'usr-mgr',
+        reportsToName: 'Marcus Chen',
+        createdAt: '2025-03-01T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+      {
+        id: 'usr-emp3',
+        email: 'amara.okafor@talentgrid.com',
+        passwordHash: hash,
+        role: 'dept_manager',
+        firstName: 'Amara',
+        lastName: 'Okafor',
+        title: 'Head of Product Design',
+        departmentId: 'dept-prod',
+        departmentName: 'Product & Design',
+        avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 882-1200',
+        joinDate: '2024-06-01',
+        location: 'New York, NY',
+        reportsToId: 'usr-admin',
+        reportsToName: 'Arthur Vance',
+        createdAt: '2024-06-01T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+      {
+        id: 'usr-emp4',
+        email: 'liam.ross@talentgrid.com',
+        passwordHash: hash,
+        role: 'employee',
+        firstName: 'Liam',
+        lastName: 'Ross',
+        title: 'Product UI/UX Designer',
+        departmentId: 'dept-prod',
+        departmentName: 'Product & Design',
+        avatarUrl: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 492-7721',
+        joinDate: '2025-05-10',
+        location: 'New York, NY',
+        reportsToId: 'usr-emp3',
+        reportsToName: 'Amara Okafor',
+        createdAt: '2025-05-10T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+      {
+        id: 'usr-emp5',
+        email: 'jordan.rivera@talentgrid.com',
+        passwordHash: hash,
+        role: 'dept_manager',
+        firstName: 'Jordan',
+        lastName: 'Rivera',
+        title: 'VP of Sales & Growth',
+        departmentId: 'dept-sales',
+        departmentName: 'Sales & Growth',
+        avatarUrl: 'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?auto=format&fit=crop&w=256&h=256&q=80',
+        status: 'active',
+        phone: '+1 (555) 303-1188',
+        joinDate: '2024-08-01',
+        location: 'Chicago, IL',
+        reportsToId: 'usr-admin',
+        reportsToName: 'Arthur Vance',
+        createdAt: '2024-08-01T08:00:00Z',
+        updatedAt: '2026-10-01T09:00:00Z',
+      },
+    ];
+
+    const leaveBalances: Record<string, LeaveBalance> = {
+      'usr-admin': { userId: 'usr-admin', annual: { total: 25, used: 2 }, sick: { total: 12, used: 0 }, casual: { total: 10, used: 1 } },
+      'usr-hr': { userId: 'usr-hr', annual: { total: 22, used: 4 }, sick: { total: 12, used: 1 }, casual: { total: 10, used: 2 } },
+      'usr-mgr': { userId: 'usr-mgr', annual: { total: 22, used: 5 }, sick: { total: 12, used: 2 }, casual: { total: 10, used: 3 } },
+      'usr-emp': { userId: 'usr-emp', annual: { total: 20, used: 3 }, sick: { total: 12, used: 1 }, casual: { total: 10, used: 2 } },
+      'usr-emp2': { userId: 'usr-emp2', annual: { total: 20, used: 6 }, sick: { total: 12, used: 0 }, casual: { total: 10, used: 1 } },
+      'usr-emp3': { userId: 'usr-emp3', annual: { total: 22, used: 3 }, sick: { total: 12, used: 0 }, casual: { total: 10, used: 1 } },
+      'usr-emp4': { userId: 'usr-emp4', annual: { total: 20, used: 2 }, sick: { total: 12, used: 1 }, casual: { total: 10, used: 0 } },
+      'usr-emp5': { userId: 'usr-emp5', annual: { total: 22, used: 4 }, sick: { total: 12, used: 0 }, casual: { total: 10, used: 2 } },
+    };
+
+    const attendance: AttendanceRecord[] = [
+      {
+        id: 'att-01',
+        userId: 'usr-emp',
+        userName: 'Sophia Lin',
+        departmentId: 'dept-eng',
+        date: '2026-10-11',
+        clockIn: '2026-10-11T08:58:12Z',
+        clockOut: '2026-10-11T17:32:05Z',
+        totalHours: 8.56,
+        status: 'present',
+        notes: 'Regular on-time shift',
+        createdAt: '2026-10-11T08:58:12Z',
+      },
+      {
+        id: 'att-02',
+        userId: 'usr-mgr',
+        userName: 'Marcus Chen',
+        departmentId: 'dept-eng',
+        date: '2026-10-11',
+        clockIn: '2026-10-11T08:45:00Z',
+        clockOut: '2026-10-11T18:10:00Z',
+        totalHours: 9.42,
+        status: 'present',
+        notes: 'Sprint planning and architecture review',
+        createdAt: '2026-10-11T08:45:00Z',
+      },
+      {
+        id: 'att-03',
+        userId: 'usr-emp2',
+        userName: 'Alex Torres',
+        departmentId: 'dept-eng',
+        date: '2026-10-11',
+        clockIn: '2026-10-11T09:25:00Z',
+        clockOut: '2026-10-11T17:45:00Z',
+        totalHours: 8.33,
+        status: 'late',
+        notes: 'Transit delay noted',
+        createdAt: '2026-10-11T09:25:00Z',
+      },
+      {
+        id: 'att-04',
+        userId: 'usr-hr',
+        userName: 'Elena Rostova',
+        departmentId: 'dept-hr',
+        date: '2026-10-11',
+        clockIn: '2026-10-11T08:50:00Z',
+        clockOut: '2026-10-11T17:05:00Z',
+        totalHours: 8.25,
+        status: 'present',
+        createdAt: '2026-10-11T08:50:00Z',
+      },
+      {
+        id: 'att-05',
+        userId: 'usr-emp',
+        userName: 'Sophia Lin',
+        departmentId: 'dept-eng',
+        date: '2026-10-10',
+        clockIn: '2026-10-10T09:02:00Z',
+        clockOut: '2026-10-10T17:40:00Z',
+        totalHours: 8.63,
+        status: 'present',
+        createdAt: '2026-10-10T09:02:00Z',
+      },
+      {
+        id: 'att-06',
+        userId: 'usr-mgr',
+        userName: 'Marcus Chen',
+        departmentId: 'dept-eng',
+        date: '2026-10-10',
+        clockIn: '2026-10-10T08:40:00Z',
+        clockOut: '2026-10-10T17:50:00Z',
+        totalHours: 9.17,
+        status: 'present',
+        createdAt: '2026-10-10T08:40:00Z',
+      },
+    ];
+
+    const leaves: LeaveRequest[] = [
+      {
+        id: 'lv-01',
+        userId: 'usr-emp',
+        userName: 'Sophia Lin',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        leaveType: 'annual',
+        startDate: '2026-10-24',
+        endDate: '2026-10-28',
+        totalDays: 4,
+        reason: 'Attending React Summit and personal family reunion.',
+        status: 'pending',
+        createdAt: '2026-10-09T14:20:00Z',
+      },
+      {
+        id: 'lv-02',
+        userId: 'usr-emp2',
+        userName: 'Alex Torres',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        leaveType: 'sick',
+        startDate: '2026-10-05',
+        endDate: '2026-10-06',
+        totalDays: 2,
+        reason: 'Seasonal viral flu and doctor recommended bed rest.',
+        status: 'approved',
+        reviewedById: 'usr-mgr',
+        reviewedByName: 'Marcus Chen',
+        reviewedAt: '2026-10-05T08:30:00Z',
+        createdAt: '2026-10-04T19:15:00Z',
+      },
+      {
+        id: 'lv-03',
+        userId: 'usr-emp4',
+        userName: 'Liam Ross',
+        departmentId: 'dept-prod',
+        departmentName: 'Product & Design',
+        leaveType: 'casual',
+        startDate: '2026-10-18',
+        endDate: '2026-10-19',
+        totalDays: 2,
+        reason: 'Personal urgent relocation affairs.',
+        status: 'pending',
+        createdAt: '2026-10-10T11:00:00Z',
+      },
+      {
+        id: 'lv-04',
+        userId: 'usr-emp',
+        userName: 'Sophia Lin',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        leaveType: 'casual',
+        startDate: '2026-09-12',
+        endDate: '2026-09-12',
+        totalDays: 1,
+        reason: 'Driver license renewal appointment.',
+        status: 'approved',
+        reviewedById: 'usr-mgr',
+        reviewedByName: 'Marcus Chen',
+        reviewedAt: '2026-09-10T15:00:00Z',
+        createdAt: '2026-09-09T10:00:00Z',
+      },
+    ];
+
+    const payroll: PayrollRecord[] = [
+      {
+        id: 'pr-01',
+        userId: 'usr-emp',
+        userName: 'Sophia Lin',
+        departmentId: 'dept-eng',
+        month: '2026-09',
+        basicSalary: 9500,
+        allowances: {
+          hra: 2200,
+          transport: 400,
+          medical: 300,
+          performanceBonus: 1000,
+        },
+        deductions: {
+          tax: 2150,
+          providentFund: 650,
+          healthInsurance: 280,
+        },
+        grossSalary: 13400,
+        netSalary: 10320,
+        status: 'paid',
+        paymentDate: '2026-09-30',
+        paymentMethod: 'direct_deposit',
+        payslipNumber: 'SLIP-202609-004',
+        createdAt: '2026-09-28T10:00:00Z',
+      },
+      {
+        id: 'pr-02',
+        userId: 'usr-emp2',
+        userName: 'Alex Torres',
+        departmentId: 'dept-eng',
+        month: '2026-09',
+        basicSalary: 9800,
+        allowances: {
+          hra: 2300,
+          transport: 400,
+          medical: 300,
+          performanceBonus: 800,
+        },
+        deductions: {
+          tax: 2250,
+          providentFund: 680,
+          healthInsurance: 280,
+        },
+        grossSalary: 13600,
+        netSalary: 10390,
+        status: 'paid',
+        paymentDate: '2026-09-30',
+        paymentMethod: 'direct_deposit',
+        payslipNumber: 'SLIP-202609-005',
+        createdAt: '2026-09-28T10:00:00Z',
+      },
+      {
+        id: 'pr-03',
+        userId: 'usr-mgr',
+        userName: 'Marcus Chen',
+        departmentId: 'dept-eng',
+        month: '2026-09',
+        basicSalary: 13500,
+        allowances: {
+          hra: 3200,
+          transport: 600,
+          medical: 500,
+          performanceBonus: 2200,
+        },
+        deductions: {
+          tax: 3800,
+          providentFund: 950,
+          healthInsurance: 350,
+        },
+        grossSalary: 20000,
+        netSalary: 14900,
+        status: 'paid',
+        paymentDate: '2026-09-30',
+        paymentMethod: 'bank_transfer',
+        payslipNumber: 'SLIP-202609-003',
+        createdAt: '2026-09-28T10:00:00Z',
+      },
+      {
+        id: 'pr-04',
+        userId: 'usr-hr',
+        userName: 'Elena Rostova',
+        departmentId: 'dept-hr',
+        month: '2026-09',
+        basicSalary: 11500,
+        allowances: {
+          hra: 2800,
+          transport: 500,
+          medical: 400,
+          performanceBonus: 1500,
+        },
+        deductions: {
+          tax: 2900,
+          providentFund: 800,
+          healthInsurance: 300,
+        },
+        grossSalary: 16700,
+        netSalary: 12700,
+        status: 'paid',
+        paymentDate: '2026-09-30',
+        paymentMethod: 'bank_transfer',
+        payslipNumber: 'SLIP-202609-002',
+        createdAt: '2026-09-28T10:00:00Z',
+      },
+      {
+        id: 'pr-05',
+        userId: 'usr-emp',
+        userName: 'Sophia Lin',
+        departmentId: 'dept-eng',
+        month: '2026-10',
+        basicSalary: 9500,
+        allowances: {
+          hra: 2200,
+          transport: 400,
+          medical: 300,
+          performanceBonus: 1200,
+        },
+        deductions: {
+          tax: 2190,
+          providentFund: 650,
+          healthInsurance: 280,
+        },
+        grossSalary: 13600,
+        netSalary: 10480,
+        status: 'processed',
+        paymentMethod: 'direct_deposit',
+        payslipNumber: 'SLIP-202610-004',
+        createdAt: '2026-10-10T09:00:00Z',
+      },
+    ];
+
+    const projects: Project[] = [
+      {
+        id: 'proj-01',
+        name: 'Nexus Cloud Microservices Migration',
+        description: 'Decompose monolithic billing and telemetry microservices into Kubernetes-managed auto-scaling clusters.',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        leadId: 'usr-mgr',
+        leadName: 'Marcus Chen',
+        status: 'in_progress',
+        priority: 'high',
+        startDate: '2026-08-01',
+        dueDate: '2026-11-30',
+        progress: 68,
+        members: ['usr-mgr', 'usr-emp', 'usr-emp2'],
+        createdAt: '2026-08-01T09:00:00Z',
+      },
+      {
+        id: 'proj-02',
+        name: 'Design System 3.0 & Accessibility Audit',
+        description: 'Comprehensive token refresh, high-contrast dark theme, and WCAG 2.2 AA compliance certification.',
+        departmentId: 'dept-prod',
+        departmentName: 'Product & Design',
+        leadId: 'usr-emp3',
+        leadName: 'Amara Okafor',
+        status: 'in_progress',
+        priority: 'medium',
+        startDate: '2026-09-01',
+        dueDate: '2026-12-15',
+        progress: 45,
+        members: ['usr-emp3', 'usr-emp4', 'usr-emp'],
+        createdAt: '2026-09-01T09:00:00Z',
+      },
+      {
+        id: 'proj-03',
+        name: 'SOC2 Type II Compliance & Zero-Trust IAM',
+        description: 'Roll out hardware MFA, mandatory session revocation, and automated cloud trail log ingestion.',
+        departmentId: 'dept-eng',
+        departmentName: 'Engineering',
+        leadId: 'usr-mgr',
+        leadName: 'Marcus Chen',
+        status: 'planning',
+        priority: 'critical',
+        startDate: '2026-10-15',
+        dueDate: '2027-01-30',
+        progress: 15,
+        members: ['usr-mgr', 'usr-emp2', 'usr-admin'],
+        createdAt: '2026-10-01T09:00:00Z',
+      },
+    ];
+
+    const tasks: Task[] = [
+      {
+        id: 'tsk-01',
+        projectId: 'proj-01',
+        projectName: 'Nexus Cloud Microservices Migration',
+        title: 'Implement idempotency tokens in payment webhook worker',
+        description: 'Ensure double-charge prevention with Redis distributed locks and atomic state transactions.',
+        assigneeId: 'usr-emp',
+        assigneeName: 'Sophia Lin',
+        assigneeAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=256&h=256&q=80',
+        createdById: 'usr-mgr',
+        priority: 'high',
+        status: 'in_progress',
+        dueDate: '2026-10-18',
+        createdAt: '2026-10-08T10:00:00Z',
+      },
+      {
+        id: 'tsk-02',
+        projectId: 'proj-01',
+        projectName: 'Nexus Cloud Microservices Migration',
+        title: 'Provision Terraform staging cluster on Google Cloud GKE',
+        description: 'Configure VPC peering, Workload Identity federation, and Cloud SQL proxy connection pool.',
+        assigneeId: 'usr-emp2',
+        assigneeName: 'Alex Torres',
+        assigneeAvatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=256&h=256&q=80',
+        createdById: 'usr-mgr',
+        priority: 'high',
+        status: 'completed',
+        dueDate: '2026-10-12',
+        completedAt: '2026-10-11T16:20:00Z',
+        createdAt: '2026-10-06T09:00:00Z',
+      },
+      {
+        id: 'tsk-03',
+        projectId: 'proj-02',
+        projectName: 'Design System 3.0 & Accessibility Audit',
+        title: 'Audit keyboard tab-trapping across all modal portals',
+        description: 'Verify focus lock, ESC dismiss, and screen-reader aria-labelledby bindings.',
+        assigneeId: 'usr-emp4',
+        assigneeName: 'Liam Ross',
+        assigneeAvatar: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?auto=format&fit=crop&w=256&h=256&q=80',
+        createdById: 'usr-emp3',
+        priority: 'medium',
+        status: 'in_review',
+        dueDate: '2026-10-15',
+        createdAt: '2026-10-07T11:00:00Z',
+      },
+      {
+        id: 'tsk-04',
+        projectId: 'proj-01',
+        projectName: 'Nexus Cloud Microservices Migration',
+        title: 'Run chaos engineering latency tests on Redis cache replicas',
+        description: 'Simulate region network partition and verify seamless failover within 800ms.',
+        assigneeId: 'usr-emp',
+        assigneeName: 'Sophia Lin',
+        assigneeAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=256&h=256&q=80',
+        createdById: 'usr-mgr',
+        priority: 'medium',
+        status: 'todo',
+        dueDate: '2026-10-22',
+        createdAt: '2026-10-10T14:30:00Z',
+      },
+    ];
+
+    const performanceReviews: PerformanceReview[] = [
+      {
+        id: 'rev-01',
+        employeeId: 'usr-emp',
+        employeeName: 'Sophia Lin',
+        departmentName: 'Engineering',
+        reviewerId: 'usr-mgr',
+        reviewerName: 'Marcus Chen',
+        period: 'Q3 2026',
+        ratingOverall: 4.8,
+        ratings: {
+          productivity: 5,
+          workQuality: 5,
+          teamwork: 4.8,
+          leadership: 4.5,
+          punctuality: 4.7,
+        },
+        achievements: 'Led the delivery of real-time pipeline telemetry ahead of schedule with zero production regression.',
+        improvements: 'Continue mentoring junior engineers on distributed systems debugging patterns.',
+        goalsForNextPeriod: 'Complete the Cloud Microservices migration and publish internal tech talk on event-driven reliability.',
+        status: 'completed',
+        reviewedAt: '2026-10-02T16:00:00Z',
+      },
+      {
+        id: 'rev-02',
+        employeeId: 'usr-emp2',
+        employeeName: 'Alex Torres',
+        departmentName: 'Engineering',
+        reviewerId: 'usr-mgr',
+        reviewerName: 'Marcus Chen',
+        period: 'Q3 2026',
+        ratingOverall: 4.5,
+        ratings: {
+          productivity: 4.6,
+          workQuality: 4.7,
+          teamwork: 4.2,
+          leadership: 4.3,
+          punctuality: 4.4,
+        },
+        achievements: 'Reduced CI/CD build execution time by 44% with intelligent caching and multi-stage container builds.',
+        improvements: 'Increase proactive communication during unexpected cloud maintenance windows.',
+        goalsForNextPeriod: 'Finalize SOC2 compliance infrastructure automation and secret rotation workflows.',
+        status: 'completed',
+        reviewedAt: '2026-10-03T11:00:00Z',
+      },
+    ];
+
+    const announcements: Announcement[] = [
+      {
+        id: 'anc-01',
+        title: 'Annual Open Enrollment Period for 2027 Health Benefits',
+        content: 'The open enrollment window for medical, dental, and vision insurance begins October 20 and closes November 10. Review your current elections in the Benefits Portal.',
+        authorId: 'usr-hr',
+        authorName: 'Elena Rostova',
+        authorRole: 'VP of People & Culture',
+        priority: 'important',
+        targetAudience: 'all',
+        isPinned: true,
+        createdAt: '2026-10-08T09:30:00Z',
+      },
+      {
+        id: 'anc-02',
+        title: 'Q3 Global All-Hands & Executive Strategy Briefing',
+        content: 'Join CEO Arthur Vance and department leadership this Thursday at 10:00 AM PST for our Q3 milestone celebrations, roadmap review, and live Q&A session.',
+        authorId: 'usr-admin',
+        authorName: 'Arthur Vance',
+        authorRole: 'Chief Executive Officer',
+        priority: 'normal',
+        targetAudience: 'all',
+        isPinned: false,
+        createdAt: '2026-10-09T15:00:00Z',
+      },
+      {
+        id: 'anc-03',
+        title: 'Scheduled Cloud Infrastructure Maintenance Window',
+        content: 'Engineering operations will conduct scheduled database indexing and cluster updates on Sunday, Oct 18, between 02:00 and 04:00 UTC. Non-production staging environments will experience intermittent restarts.',
+        authorId: 'usr-mgr',
+        authorName: 'Marcus Chen',
+        authorRole: 'Director of Engineering',
+        priority: 'urgent',
+        targetAudience: 'engineering',
+        isPinned: false,
+        createdAt: '2026-10-10T12:00:00Z',
+      },
+    ];
+
+    const auditLogs: AuditLog[] = [
+      {
+        id: 'aud-01',
+        timestamp: '2026-10-11T20:15:32Z',
+        actorId: 'usr-admin',
+        actorEmail: 'admin@talentgrid.com',
+        actorRole: 'super_admin',
+        action: 'UPDATE_COMPANY_SETTINGS',
+        resource: 'CompanySettings',
+        details: 'Updated annual leave entitlement policy parameters.',
+        ipAddress: '192.168.1.10',
+      },
+      {
+        id: 'aud-02',
+        timestamp: '2026-10-11T17:35:00Z',
+        actorId: 'usr-emp',
+        actorEmail: 'employee@talentgrid.com',
+        actorRole: 'employee',
+        action: 'ATTENDANCE_CLOCK_OUT',
+        resource: 'AttendanceRecord',
+        details: 'User clocked out successfully. Total shift: 8.56 hrs.',
+        ipAddress: '192.168.1.44',
+      },
+      {
+        id: 'aud-03',
+        timestamp: '2026-10-10T09:00:00Z',
+        actorId: 'usr-hr',
+        actorEmail: 'hr@talentgrid.com',
+        actorRole: 'hr_manager',
+        action: 'PAYROLL_GENERATION',
+        resource: 'PayrollRecord',
+        details: 'Processed September salary ledger batch for all departments.',
+        ipAddress: '192.168.1.25',
+      },
+      {
+        id: 'aud-04',
+        timestamp: '2026-10-05T08:30:00Z',
+        actorId: 'usr-mgr',
+        actorEmail: 'manager@talentgrid.com',
+        actorRole: 'dept_manager',
+        action: 'LEAVE_APPROVAL',
+        resource: 'LeaveRequest',
+        details: 'Approved sick leave request for Alex Torres.',
+        ipAddress: '192.168.1.15',
+      },
+    ];
+
+    const settings: CompanySettings = {
+      companyName: 'TalentGrid Technologies, Inc.',
+      workDays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+      workStartTime: '09:00',
+      workEndTime: '17:00',
+      annualLeaveQuota: 20,
+      sickLeaveQuota: 12,
+      casualLeaveQuota: 10,
+      currency: 'USD',
+      fiscalYearStart: 'January',
+    };
+
+    const initialData: DatabaseSchema = {
+      users,
+      departments,
+      attendance,
+      leaves,
+      leaveBalances,
+      payroll,
+      projects,
+      tasks,
+      performanceReviews,
+      announcements,
+      auditLogs,
+      settings,
+    };
+
+    // Save initial state to disk
+    try {
+      const dir = path.dirname(DB_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn('Initial write error:', e);
+    }
+
+    return initialData;
+  }
+
+  // Collection Accessors
+  get users() { return this.data.users; }
+  get departments() { return this.data.departments; }
+  get attendance() { return this.data.attendance; }
+  get leaves() { return this.data.leaves; }
+  get leaveBalances() { return this.data.leaveBalances; }
+  get payroll() { return this.data.payroll; }
+  get projects() { return this.data.projects; }
+  get tasks() { return this.data.tasks; }
+  get performanceReviews() { return this.data.performanceReviews; }
+  get announcements() { return this.data.announcements; }
+  get auditLogs() { return this.data.auditLogs; }
+  get settings() { return this.data.settings; }
+
+  // Mutation helpers with auto-save
+  saveMutation() {
+    this.save();
+  }
+
+  addAuditLog(actorId: string, actorEmail: string, actorRole: string, action: string, resource: string, details: string, ipAddress: string = '127.0.0.1') {
+    const log: AuditLog = {
+      id: `aud-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      actorId,
+      actorEmail,
+      actorRole,
+      action,
+      resource,
+      details,
+      ipAddress,
+    };
+    this.data.auditLogs.unshift(log);
+    // keep last 500
+    if (this.data.auditLogs.length > 500) {
+      this.data.auditLogs = this.data.auditLogs.slice(0, 500);
+    }
+    this.save();
+    return log;
+  }
+}
+
+export const db = new DatabaseEngine();

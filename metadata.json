@@ -1,0 +1,6 @@
+{
+  "name": "TalentGrid Enterprise EMS",
+  "description": "Enterprise-grade Employee Management System with role-based access control, attendance clocking, leave management, payroll, projects, and workforce analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
