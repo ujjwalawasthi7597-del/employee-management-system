@@ -99,7 +99,7 @@ Access the deployed application:
 
 **Ujjwal Awasthi**
 
-GitHub: Add your GitHub profile link here.
+GitHub: https://github.com/ujjwalawasthi7597-del
 
 ---
 
